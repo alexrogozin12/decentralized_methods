@@ -17,6 +17,7 @@ class DGM:
                 step size in the gradients' update
 
             graph_generator: object
+                as one of the output variables
                 must produce a mixing matrix of a generated graph
         """
         self.F = F
@@ -25,6 +26,10 @@ class DGM:
         self.n = F.b.size(0)
         self.gen = graph_generator
         self._initLogs()
+        self._k = 0
+
+    def _args(self, kwargs):
+        raise NotImplementedError
         
     def _initLogs(self):
         self.logs = {'i': [], 'fn': [], 'dist2con': []}
@@ -38,71 +43,81 @@ class DGM:
         self.logs['dist2con'].append(self._dist2consensus(X).item())
         self.logs['fn'].append(self.F(X.mean(1)).item())
         self.logs['i'].append(k)
+
+    def run(self, X0, n_iters=10, lp=1, **kwargs):
+        if kwargs: args = self._args(kwargs)
+        else: args = self._stateInit(X0)
+
+        for k in range(n_iters):
+            X0, *args = self._step(X0, *args)
+            if k%lp == 0: self._record(X0, k+self._k)
+        self._k += k
+
+        return X0, *args
         
         
 class EXTRON(DGM):
     """
     ONe-process EXTRA algorithm
     """
-    def _step1(self, X0):
+    def _args(self, kwargs):
+        G0 = kwargs['G0']
+        X1 = kwargs['X1']
+        return G0, X1
+
+    def _stateInit(self, X0):
         _, W = self._G, self._W = self.gen()
         X0.requires_grad_(True)
         G0 = D(self.F(X0), X0)
         with torch.no_grad():
             X1 = X0@W - self.alpha*G0
+        self._initLogs()
+        self._record(X1, 0)
+        self._k += 1
+
         return G0, X1
 
-    def _step2(self, X0, G0, X1):
-        _, W = self._G, self._W = self.gen()
+    def _step(self, X0, G0, X1):
+        _,W = self._G,self._W = self.gen()
         X1.requires_grad_(True)
         G1 = D(self.F(X1), X1)
         with torch.no_grad():
             X2 = X1 - X0/2 + (X1-X0/2)@W - self.alpha*(G1-G0)
+
         return X1, G1, X2
-
-    def run(self, X0, G0=None, X1=None, n_iters=10, lp=1):
-        if G0 is None or X1 is None:
-            G0, X1 = self._step1(X0)
-            self._initLogs()
-            self._record(X1, 0)
-
-        for k in range(1, n_iters):
-            X0, G0, X1 = self._step2(X0, G0, X1)
-            if k%lp == 0: self._record(X1, k)
-
-        return X0, G0, X1
 
 
 class DIGONing(DGM):
     """
     ONe-process DIGing algorithm
     """
-    def run(self, X0, G0=None, Y0=None, n_iters=10, lp=1):
-        if G0 is None or Y0 is None:
-            self._initLogs()
-            X0.requires_grad_(True)
-            Y0 = D(self.F(X0), X0)
-            G0 = Y0.clone()
+    def _args(self, kwargs):
+        G0 = kwargs['G0']
+        Y0 = kwargs['Y0']
+        return G0, Y0
+
+    def _stateInit(self, X0):
+        X0.requires_grad_(True)
+        Y0 = D(self.F(X0), X0)
+        G0 = Y0.clone()
+        return G0, Y0
+
+    def _step(self, X0, G0, Y0):
+        _, W = self._G, self._W = self.gen()
+        with torch.no_grad():
+            X1 = X0@W - self.alpha*Y0
             
-        for k in range(1, n_iters):
-            _, W = self._G, self._W = self.gen()
-            with torch.no_grad():
-                X1 = X0@W - self.alpha*Y0
-                
-            X1.requires_grad_(True)
-            G1 = D(self.F(X1), X1)
-            with torch.no_grad():
-                Y1 = Y0@W + G1 - G0
-                
-            X0, Y0, G0 = X1, Y1, G1
-            if k%lp == 0: self._record(X0, k)
-            
-        return X0, G0, Y0
+        X1.requires_grad_(True)
+        G1 = D(self.F(X1), X1)
+        with torch.no_grad():
+            Y1 = Y0@W + G1 - G0
+
+        return X1, G1, Y1
     
     
 class DAGDON(DGM):
     """
-    One-process AGD subroutine 
+    Decentralized ONe-process AGD subroutine
     """
     def __init__(self, F, graph_generator, L=1., mu=0., T=20):
         """
@@ -118,38 +133,39 @@ class DAGDON(DGM):
                 number of consequently generated grpahs
                 to use in the consensus operation
         """
-        self.F = F
-        self.T = T
+        super().__init__(F, graph_generator)
+        del self.alpha
+
         self.L = L
         self.mu = mu
-        self.n = F.b.size(0)
-        self.gen = graph_generator
+        self.consensus = TensorAccumulator(T)
+
+    def _args(self, kwargs):
+        A0 = kwargs['A0']
+        U0 = kwargs['U0']
+        return A0, U0
+
+    def _stateInit(self, X0):
+        self._initLogs()
+        A0, U0 = 0, X0.clone()
+        return A0, U0
+
+    def _step(self, X0, A0, U0):
+        _, W = self._G, self._W = self.gen()
+        self.consensus.append(W)
         
-    def run(self, X0, A0=None, n_iters=10, lp=1):
-        if A0 is None:
-            a0 = A0 = 0
-            U0 = X0.clone()
-            self._initLogs()
-            
-        consensus = TensorAccumulator(self.T)
-        for k in range(1, n_iters):
-            _, W = self._G, self._W = self.gen()
-            consensus.append(W)
-            
-            a1 = 1 + A0*self.mu
-            a1 = (a1 + (a1**2 + 4*self.L*A0*a1)**.5)/(2*self.L)
-            A1 = A0 + a1
-            
-            Y = (a1*U0 + A0*X0)/A1
-            Y.requires_grad_(True)
-            G = D(self.F(Y), Y)
-            with torch.no_grad():
-                V = self.mu*Y + (1+A0*self.mu)*U0 - a1*G
-                V /= 1 + A0*self.mu + self.mu
-                U1 = consensus.mm(V)
-                X1 = (a1*U1 + A0*X0) / A1
-                
-            X0, A0 = X1, A1
-            if k%lp == 0: self._record(X0, k)
-                
-        return X0, A0
+        a = 1 + A0*self.mu
+        a = (a + (a**2 + 4*self.L*A0*a)**.5)/(2*self.L)
+        A1 = A0 + a
+
+        Y = (a*U0 + A0*X0) / A1
+        Y.requires_grad_(True)
+        G = D(self.F(Y), Y)
+
+        with torch.no_grad():
+            V = self.mu*Y + (1+A0*self.mu)*U0 - a*G
+            V /= 1 + A0*self.mu + self.mu
+            U1 = self.consensus.mm(V)
+            X1 = (a*U1 + A0*X0) / A1
+
+        return X1, A1, U1
