@@ -5,6 +5,7 @@ import torch
 import networkx as nx
 
 from torch import autograd
+from torch_geometric.utils.random import erdos_renyi_graph
 
 
 def uniform_decompose(N, m, b=8):
@@ -13,7 +14,7 @@ def uniform_decompose(N, m, b=8):
     so that: max_i a_i - min_i a_i <= 1 applies
     --------
     b is a number of bits used for an integer
-    in the output array
+    in the output array.
     """
     terms = np.empty(m, dtype=f'i{b}')
     terms[:] = math.floor(N/m)
@@ -23,7 +24,7 @@ def uniform_decompose(N, m, b=8):
 
 def D(y, x):
     """
-    Differential operator
+    Differential operator.
     """
     grad = autograd.grad(
         outputs=y, inputs=x,
@@ -37,45 +38,79 @@ def D(y, x):
 
 def metropolis_weights(A):
     """
-    A - Adjacency matrix (i.e., symmetric and with zero diagonal)
+    A - Adjacency matrix (i.e., symmetric and with zero diagonal).
     """
     A = A / (1 + torch.max(A.sum(1,keepdims=True),A.sum(0,keepdims=True)))
     A.as_strided([len(A)], [len(A)+1]).copy_(1-A.sum(1))
     return A
 
 
-def dummy_consensus_variation(F, graph='erdos_renyi', p=.2):
+class PythonGraph:
     """
-    Graph-generator
-    Returns a generated graph and its mixing matrix
+    Graph-generator.
+    Returns a generated graph and its mixing matrix.
 
     Params:
         F: Objective
-            functional being optimized that keeps information
-            about the number of nodes and data type to work with
+            Functional being optimized that keeps information
+            about the number of nodes and data type to work with.
 
         graph: str
-            type of a graph to generate
+            Type of a graph to generate.
 
         p: float, non-negative
-            in random graphs, probability that an edge exists
-            The value is ignored in case of deterministic graphs
+            In random graphs, probability that an edge exists.
+            The value is ignored in case of deterministic graphs.
+    """
+    def __init__(self, F, graph='erdos_renyi', pr=.2):
+        num_nodes = F.b.size(0)
+
+        if graph == 'erdos_renyi':
+            self.args = (num_nodes, pr)
+        elif graph == 'random_geometric':
+            graph = 'generators.geometric.' + graph
+            self.args = (num_nodes, pr)
+        else:
+            self.args = (num_nodes,)
+        self.method = eval(f'nx.{graph}_graph')
+        self._mold = F.b.new_tensor
+
+    def gen(self):
+        G = self.method(*self.args)
+        S = nx.adjacency_matrix(G)
+        S = self._mold(S.todense())
+        W = metropolis_weights(S)
+        return G, W
+
+
+def consensus_variation(F, p=.2):
+    """
+    Graph-generator.
+    Returns `erdos-renyi` graph and its mixing matrix.
+    This function requires `torch_geometric` installed
+
+    Params:
+        F: Objective
+            Functional being optimized that keeps information
+            about the number of nodes and data type to work with.
+
+        p: float, non-negative
+            In random graphs, probability that an edge exists.
+            The value is ignored in case of deterministic graphs.
     """
     num_nodes = F.b.size(0)
-    args = (num_nodes, p) if graph == 'erdos_renyi' else (num_nodes,)
-    G = eval(f'nx.{graph}_graph')(*args)
-    
-    S = nx.adjacency_matrix(G).todense()
-    S = F.b.new_tensor(S)
-    
+    e1, e2 = erdos_renyi_graph(num_nodes, p)
+    S = F.b.new_zeros(num_nodes, num_nodes)
+    S[e1, e2] = 1.
+
     W = metropolis_weights(S)
-    return G, W 
+    return W
 
 
 class TensorAccumulator:
     """
     Accumulates tensors and performs efficient
-    chained matrix multiplication
+    chained matrix multiplication.
     """
     def __init__(self, seq_length):
         self.n = seq_length
@@ -87,4 +122,4 @@ class TensorAccumulator:
         self.acc.append(X)
             
     def mm(self, X):
-        return torch.chain_matmul(X, *self.acc)
+        return torch.chain_matmul(*self.acc, X)

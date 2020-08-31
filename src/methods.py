@@ -2,61 +2,77 @@ import torch
 from .utils import D, dummy_consensus_variation, TensorAccumulator
 
 
-class DGM:
+class DGMBase:
     """
-    Base class for decentralized gradient methods
+    Base class for decentralized gradient methods.
     """
     def __init__(self, F, graph_generator, alpha=1.):
         """
         Params:
         -------
             F: Objective
-                objective to optimize
+                Objective to optimize.
 
             alpha: float
-                step size in the gradients' update
+                Step size in the gradients' update.
 
             graph_generator: object
-                as one of the output variables
-                must produce a mixing matrix of a generated graph
+                As one of the output variables
+                must produce a mixing matrix of a generated graph.
         """
         self.F = F
-        self.alpha = alpha
+        self.alpha = self._alpha = alpha
         
         self.n = F.b.size(0)
         self.gen = graph_generator
         self._initLogs()
-        self._k = 0
 
     def _args(self, kwargs):
         raise NotImplementedError
+
+    def _stateInit(self, X0):
+        raise NotImplementedError
+
+    def _step(self, X0, *args):
+        raise NotImplementedError
+
+    def _updateStepsize(self, k):
+        pass
         
     def _initLogs(self):
         self.logs = {'i': [], 'fn': [], 'dist2con': []}
+        self._k = 0
         
     def _dist2consensus(self, X):
         h = X.new(self.n).fill_(1.)
-        Q = torch.norm(X - X/self.n @ h[:,None]*h)
+        Q = torch.norm(X - h[:,None]*h @ X/self.n)
         return Q
         
     def _record(self, X, k):
         self.logs['dist2con'].append(self._dist2consensus(X).item())
-        self.logs['fn'].append(self.F(X.mean(1)).item())
+        self.logs['fn'].append(self.F(X.mean(0)).item())
         self.logs['i'].append(k)
 
-    def run(self, X0, n_iters=10, lp=1, **kwargs):
+    def run(self, X0, n_iters=100, lp=1, **kwargs):
         if kwargs: args = self._args(kwargs)
         else: args = self._stateInit(X0)
 
-        for k in range(n_iters):
+        for k in range(self._k, self._k+n_iters):
             X0, *args = self._step(X0, *args)
-            if k%lp == 0: self._record(X0, k+self._k)
-        self._k += k
+            if k%lp == 0: self._record(X0, k)
+            self._updateStepsize(k)
+        self._k += n_iters
 
-        return X0, *args
+        ## Next line works only in python >= 3.8
+        # return X0, *args
+
+        ## For compatibility with python <= 3.7,
+        ## variable `out` is imposed
+        out = X0, *args
+        return out
         
         
-class EXTRON(DGM):
+class EXTRON(DGMBase):
     """
     ONe-process EXTRA algorithm
     """
@@ -70,7 +86,7 @@ class EXTRON(DGM):
         X0.requires_grad_(True)
         G0 = D(self.F(X0), X0)
         with torch.no_grad():
-            X1 = X0@W - self.alpha*G0
+            X1 = W@X0 - self.alpha*G0
         self._initLogs()
         self._record(X1, 0)
         self._k += 1
@@ -82,12 +98,12 @@ class EXTRON(DGM):
         X1.requires_grad_(True)
         G1 = D(self.F(X1), X1)
         with torch.no_grad():
-            X2 = X1 - X0/2 + (X1-X0/2)@W - self.alpha*(G1-G0)
+            X2 = X1 - X0/2 + W@(X1-X0/2) - self.alpha*(G1-G0)
 
         return X1, G1, X2
 
 
-class DIGONing(DGM):
+class DIGONing(DGMBase):
     """
     ONe-process DIGing algorithm
     """
@@ -97,6 +113,7 @@ class DIGONing(DGM):
         return G0, Y0
 
     def _stateInit(self, X0):
+        self._initLogs()
         X0.requires_grad_(True)
         Y0 = D(self.F(X0), X0)
         G0 = Y0.clone()
@@ -105,17 +122,17 @@ class DIGONing(DGM):
     def _step(self, X0, G0, Y0):
         _, W = self._G, self._W = self.gen()
         with torch.no_grad():
-            X1 = X0@W - self.alpha*Y0
+            X1 = W@X0 - self.alpha*Y0
             
         X1.requires_grad_(True)
         G1 = D(self.F(X1), X1)
         with torch.no_grad():
-            Y1 = Y0@W + G1 - G0
+            Y1 = W@Y0 + G1 - G0
 
         return X1, G1, Y1
     
     
-class DAGDON(DGM):
+class DAGDON(DGMBase):
     """
     Decentralized ONe-process AGD subroutine
     """
@@ -124,14 +141,15 @@ class DAGDON(DGM):
         Params:
         -------
             L: float
-                average of Lipshitz constants in the objective
+                Average of Lipshitz constants in the objective.
 
             mu: float
-                average of strong convexity constants
+                Average of strong convexity constants. If mu > 0,
+                float overflow occurs after some number of iterations.
 
             T: int
-                number of consequently generated grpahs
-                to use in the consensus operation
+                Number of consequently generated grpahs
+                to use in the consensus operation.
         """
         super().__init__(F, graph_generator)
         del self.alpha
@@ -169,3 +187,29 @@ class DAGDON(DGM):
             X1 = (a*U1 + A0*X0) / A1
 
         return X1, A1, U1
+
+
+# Maybe, we need to write a separate
+# base class for stochastic methods
+
+class DOGSGD(DGMBase):
+    """
+    Decentralized One-process (Gossip) SGD
+    """
+    def _args(self, kwargs):
+        return ()
+
+    def _stateInit(self, X0):
+        self._initLogs()
+        return ()
+
+    def _updateStepsize(self, k):
+        self.alpha = self._alpha # / (1+k)**.5
+
+    def _step(self, X0, *args):
+        X0.requires_grad_(True)
+        G = D(self.F(X0), X0)
+        W = self._W = self.gen()
+        with torch.no_grad():
+            X1 = W @ (X0-self.alpha*G)
+        return (X1,)
