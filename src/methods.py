@@ -1,5 +1,5 @@
 import torch
-from .utils import D, dummy_consensus_variation, TensorAccumulator
+from .utils import D, consensus_variation, TensorAccumulator
 
 
 class DGMBase:
@@ -44,9 +44,7 @@ class DGMBase:
         self._k = 0
         
     def _dist2consensus(self, X):
-        h = X.new(self.n).fill_(1.)
-        Q = torch.norm(X - h[:,None]*h @ X/self.n)
-        return Q
+        return X.var(dim=0, unbiased=False).sum() * self.n
         
     def _record(self, X, k):
         self.logs['dist2con'].append(self._dist2consensus(X).item())
