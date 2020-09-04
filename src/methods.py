@@ -70,7 +70,7 @@ class DGMBase:
         return out
         
         
-class EXTRON(DGMBase):
+class EXTRA(DGMBase):
     """
     ONe-process EXTRA algorithm
     """
@@ -101,7 +101,7 @@ class EXTRON(DGMBase):
         return X1, G1, X2
 
 
-class DIGONing(DGMBase):
+class DIGing(DGMBase):
     """
     ONe-process DIGing algorithm
     """
@@ -130,7 +130,7 @@ class DIGONing(DGMBase):
         return X1, G1, Y1
     
     
-class DAGDON(DGMBase):
+class DAccGD(DGMBase):
     """
     Decentralized ONe-process AGD subroutine
     """
@@ -190,7 +190,7 @@ class DAGDON(DGMBase):
 # Maybe, we need to write a separate
 # base class for stochastic methods
 
-class DOGSGD(DGMBase):
+class DSGD(DGMBase):
     """
     Decentralized One-process (Gossip) SGD
     """
