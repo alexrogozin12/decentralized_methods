@@ -154,7 +154,7 @@ class DAccGD(DGMBase):
 
         self.L = L
         self.mu = mu
-        self.consensus = TensorAccumulator(T)
+        self.consensus_iters = T
 
     def _args(self, kwargs):
         A0 = kwargs['A0']
@@ -167,9 +167,6 @@ class DAccGD(DGMBase):
         return A0, U0
 
     def _step(self, X0, A0, U0):
-        _, W = self._G, self._W = self.gen()
-        self.consensus.append(W)
-        
         a = 1 + A0*self.mu
         a = (a + (a**2 + 4*self.L*A0*a)**.5)/(2*self.L)
         A1 = A0 + a
@@ -181,7 +178,8 @@ class DAccGD(DGMBase):
         with torch.no_grad():
             V = self.mu*Y + (1+A0*self.mu)*U0 - a*G
             V /= 1 + A0*self.mu + self.mu
-            U1 = self.consensus.mm(V)
+            consensus = [self.gen()[1] for _ in range(self.consensus_iters)]
+            U1 = torch.chain_matmul(*consensus, V)
             X1 = (a*U1 + A0*X0) / A1
 
         return X1, A1, U1
