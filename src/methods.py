@@ -1,5 +1,5 @@
 import torch
-from .utils import D, consensus_variation, TensorAccumulator
+from .utils import D
 
 
 class DGMBase:
@@ -72,7 +72,7 @@ class DGMBase:
         
 class EXTRA(DGMBase):
     """
-    ONe-process EXTRA algorithm
+    One-process EXTRA algorithm
     """
     def _args(self, kwargs):
         G0 = kwargs['G0']
@@ -80,7 +80,7 @@ class EXTRA(DGMBase):
         return G0, X1
 
     def _stateInit(self, X0):
-        _, W = self._G, self._W = self.gen()
+        W = self.gen()
         X0.requires_grad_(True)
         G0 = D(self.F(X0), X0)
         with torch.no_grad():
@@ -92,7 +92,7 @@ class EXTRA(DGMBase):
         return G0, X1
 
     def _step(self, X0, G0, X1):
-        _,W = self._G,self._W = self.gen()
+        W = self.gen()
         X1.requires_grad_(True)
         G1 = D(self.F(X1), X1)
         with torch.no_grad():
@@ -103,7 +103,7 @@ class EXTRA(DGMBase):
 
 class DIGing(DGMBase):
     """
-    ONe-process DIGing algorithm
+    One-process DIGing algorithm
     """
     def _args(self, kwargs):
         G0 = kwargs['G0']
@@ -118,7 +118,7 @@ class DIGing(DGMBase):
         return G0, Y0
 
     def _step(self, X0, G0, Y0):
-        _, W = self._G, self._W = self.gen()
+        W = self.gen()
         with torch.no_grad():
             X1 = W@X0 - self.alpha*Y0
             
@@ -132,7 +132,7 @@ class DIGing(DGMBase):
     
 class DAccGD(DGMBase):
     """
-    Decentralized ONe-process AGD subroutine
+    Decentralized one-process AGD subroutine
     """
     def __init__(self, F, graph_generator, L=1., mu=0., T=20):
         """
@@ -146,7 +146,7 @@ class DAccGD(DGMBase):
                 float overflow occurs after some number of iterations.
 
             T: int
-                Number of consequently generated grpahs
+                Number of consequently generated graphs
                 to use in the consensus operation.
         """
         super().__init__(F, graph_generator)
@@ -154,7 +154,7 @@ class DAccGD(DGMBase):
 
         self.L = L
         self.mu = mu
-        self.consensus_iters = T
+        self.T = T
 
     def _args(self, kwargs):
         A0 = kwargs['A0']
@@ -168,29 +168,26 @@ class DAccGD(DGMBase):
 
     def _step(self, X0, A0, U0):
         a = 1 + A0*self.mu
-        a = (a + (a**2 + 4*self.L*A0*a)**.5)/(2*self.L)
+        a = (a + (a**2 + 4*self.L*A0*a)**.5) / (2*self.L)
         A1 = A0 + a
 
         Y = (a*U0 + A0*X0) / A1
         Y.requires_grad_(True)
         G = D(self.F(Y), Y)
 
+        W_series = [self.gen() for _ in range(self.T)]
         with torch.no_grad():
             V = self.mu*Y + (1+A0*self.mu)*U0 - a*G
             V /= 1 + A0*self.mu + self.mu
-            consensus = [self.gen()[1] for _ in range(self.consensus_iters)]
-            U1 = torch.chain_matmul(*consensus, V)
+            U1 = torch.chain_matmul(*W_series, V)
             X1 = (a*U1 + A0*X0) / A1
 
         return X1, A1, U1
 
 
-# Maybe, we need to write a separate
-# base class for stochastic methods
-
 class DSGD(DGMBase):
     """
-    Decentralized One-process (Gossip) SGD
+    Decentralized one-process (Gossip) SGD
     """
     def _args(self, kwargs):
         return ()
@@ -205,7 +202,7 @@ class DSGD(DGMBase):
     def _step(self, X0, *args):
         X0.requires_grad_(True)
         G = D(self.F(X0), X0)
-        W = self._W = self.gen()
+        W = self.gen()
         with torch.no_grad():
             X1 = W @ (X0-self.alpha*G)
         return (X1,)

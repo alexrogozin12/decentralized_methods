@@ -33,29 +33,34 @@ class LogRegression(Objective):
         return Y
 
 
-# Probably, the code for StochObjective class should be simplified
-
 class StochObjective(Objective):
     """
-    Base class for a stochastic optimization functional
+    Base class for a stochastic optimization functional.
 
     Params:
     -------
         m: torch.tensor
-            Number of rows selected in a block
+            Number of rows selected in a block.
+
+        avg: float
+            Number of batches sampled on every node.
+
+        mCols: torch.LongTensor
+            Initial batch sizes on nodes.
+
+        static: bool
+            If set to True, freezes the batch sizes to ones
+            given at the initialization.
     """
-    # TODO: write short description of the input parameters
     def __init__(self, A, b, num_nodes, avg=1, mCols=None, static=True):
         super().__init__(A, b, num_nodes)
         self.m = mCols
         self.avg = avg
 
         n, d = self.b.shape
+        self.static = static
         self.sampleM = lambda : self._sampleM(d//2, d, n)
-        if mCols is None: self.m = self.sampleM()
-
-        if static: self._call = self._stationaryCall
-        else: self._call = self._volatileCall
+        if mCols is None and static: self.m = self.sampleM()
 
     def _sampleXi(self, m):
         ones = torch.ones_like(self.b)
@@ -74,13 +79,7 @@ class StochObjective(Objective):
         return torch.randint(limA, limB, (size,))
 
     def __call__(self, X):
-        return self._call(X)
-
-    def _stationaryCall(self, X):
-        return self._fnCall(X, self.m)
-
-    def _volatileCall(self, X):
-        self.m = self.sampleM()
+        if self.static: self.m = self.sampleM()
         return self._fnCall(X, self.m)
 
     def _fnCall(self, X, m):

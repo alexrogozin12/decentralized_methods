@@ -107,19 +107,49 @@ def consensus_variation(F, p=.2):
     return W
 
 
-class TensorAccumulator:
+class ConsensusAmplifier:
     """
-    Accumulates tensors and performs efficient
-    chained matrix multiplication.
+    Generates and accumulates/stores mixing matrices
+
+    Params:
+    -------
+        gen: function
+            Generates a graph and returns its mixing matrix.
+
+        seq_length: int, positive
+            Number of mixing matrices in accumulator list.
+
+        stingy: bool
+            Update mode. If True, the oldest mixing matrix
+            is dropped and a new one is added.
     """
-    def __init__(self, seq_length):
+    def __init__(self, gen, seq_length, stingy=True, W_series=[]):
+        self.gen = gen
         self.n = seq_length
+        if stingy:
+            self.acc = W_series
+            assert(len(W_series) <= seq_length)
+            self.update = self._update_old
+        else:
+            self.update = self._update_all
+
+    def _update_all(self):
         self.acc = []
-    
-    def append(self, X):
+        for _ in range(self.n):
+            W = self.gen()
+            self.acc.append(W)
+        return W
+
+    def _update_old(self):
+        W = self.gen()
         if len(self.acc) >= self.n:
             self.acc.pop(0)
-        self.acc.append(X)
+        self.acc.append(W)
+        return W
             
     def mm(self, X):
+        """
+        Performs efficient multiplication of
+        mixing matrices and given tensor.
+        """
         return torch.chain_matmul(*self.acc, X)
