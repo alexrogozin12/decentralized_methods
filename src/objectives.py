@@ -4,32 +4,54 @@ from torch.nn.utils.rnn import pad_sequence
 from .utils import uniform_decompose
 
 
-class Objective:
+class Objective(object):
     """
-    Base class for an optimization functional
+    Base class for an optimization functional.
     """
-    def __init__(self, A, b, num_nodes):
+    def __init__(self, A, b, num_nodes, sigma=1e-1):
         """
-        A - matrix, i.e. torch 2D tensor
-        b - vector, i.e. torch 1D tensor
+        A - matrix, i.e. torch 2D tensor.
+        b - vector, i.e. torch 1D tensor.
+        sigma - float or torch 1D tensor.
         """
         chunk_sizes = uniform_decompose(A.size(0), num_nodes)
         self.A = pad_sequence(A.split(chunk_sizes), batch_first=True)
         self.b = pad_sequence(b.split(chunk_sizes), batch_first=True)
+        self.sigma = sigma
+        # define self._norm
+
+    @property
+    def sigma(self):
+        return self.__sigma
+
+    @sigma.setter
+    def sigma(self, sigma):
+        if isinstance(sigma, (int, float)):
+            self.__sigma = self.b.new(
+                    len(self.b)).fill_(sigma)[:, None]
+        elif isinstance(sigma, torch.Tensor):
+            assert(sigma.ndim == 1)
+            self.__sigma = sigma[:, None]
+        else: raise TypeError(
+                'sigma must be a number or 1D torch.Tensor')
 
 
+# NOTE: logging overhead
 class LeastSquares(Objective):
     def __call__(self, X):
         i = '' if X.ndim < 2 else 'i'
         Y = torch.einsum(f'ijk,{i}k->ij', self.A, X) - self.b
-        return Y.square().mean()
+        Y = Y.square().mean() + torch.norm(self.sigma*X, dim=1).mean()
+        return Y
 
 
+# NOTE: logging overhead
 class LogRegression(Objective):
     def __call__(self, X):
         i = '' if X.ndim < 2 else 'i'
         Y = torch.einsum(f'ij,ijk,{i}k->ij', self.b, self.A, X)
-        Y = torch.logaddexp(-Y, Y.new([0.])).mean()
+        Y = (torch.logaddexp(-Y, Y.new([0.])).mean()
+                + torch.norm(self.sigma*X, dim=1).mean())
         return Y
 
 
@@ -52,8 +74,10 @@ class StochObjective(Objective):
             If set to True, freezes the batch sizes to ones
             given at the initialization.
     """
-    def __init__(self, A, b, num_nodes, avg=1, mCols=None, static=True):
-        super().__init__(A, b, num_nodes)
+    def __init__(
+            self, A, b, num_nodes,
+            sigma=1e-1, avg=1, mCols=None, static=True):
+        super().__init__(A, b, num_nodes, sigma)
         self.m = mCols
         self.avg = avg
 
@@ -86,6 +110,7 @@ class StochObjective(Objective):
         raise NotImplementedError
 
 
+# NOTE: logging overhead
 class StochLeastSquares(StochObjective):
     def _fnCall(self, X, m):
         xi = self.sampleXi(m)
@@ -96,9 +121,12 @@ class StochLeastSquares(StochObjective):
                 xi, self.A, X) - xi*self.b
 
         if p: Y = Y.mean(0)
-        return Y.square().mean()
+        Y = (Y.square().mean()
+                + torch.norm(self.sigma*X, dim=1).mean())
+        return Y
 
 
+# NOTE: logging overhead
 class StochLogRegression(StochObjective):
     def _fnCall(self, X, m):
         xi = self.sampleXi(m)
@@ -109,5 +137,6 @@ class StochLogRegression(StochObjective):
         Y = torch.einsum(f'{p}ij,ijk,{i}k->{p}ij', xi, self.A, X)
         if p: Y = Y.mean(0)
 
-        Y = torch.logaddexp(-Y, Y.new([0.])).mean()
+        Y = (torch.logaddexp(-Y, Y.new([0.])).mean()
+                + torch.norm(self.sigma*X, dim=1).mean())
         return Y
