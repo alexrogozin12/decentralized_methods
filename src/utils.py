@@ -45,6 +45,11 @@ def metropolis_weights(A):
     return A
 
 
+def lambda_2(W):
+    s,_ = torch.lobpcg(W, 2)
+    return s[1]
+
+
 class PythonGraph:
     """
     Graph-generator.

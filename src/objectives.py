@@ -4,7 +4,7 @@ from torch.nn.utils.rnn import pad_sequence
 from .utils import uniform_decompose
 
 
-class Objective(object):
+class Objective:
     """
     Base class for an optimization functional.
     """
