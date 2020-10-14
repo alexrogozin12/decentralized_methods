@@ -1,6 +1,6 @@
 import math
 import torch
-from .utils import D, lambda_2
+from .utils import D, lambda_2, expected_lambda2
 
 
 class DGMBase:
@@ -35,11 +35,24 @@ class DGMBase:
     def _step(self, X0, *args):
         raise NotImplementedError
 
+    def _consensus(self, X0, *args):
+        cT = self._cT + self.con_iters
+        self._cT = cT
+
+        self.logs['nmix'].append(cT)
+        return self._consensusUpdate(X0, *args)
+
+    def _consensusUpdate(self, X0):
+        W = self.gen()
+        X1 = W @ X0
+        return X1
+
     def _updateStepsize(self, k):
         pass
         
     def _initLogs(self):
-        self.logs = {'i': [], 'fn': [], 'dist2con': []}
+        self.logs = {'i': [], 'fn': [], 'dist2con': [], 'nmix': []}
+        self._cT = 0
         self._k = 0
         
     def _dist2consensus(self, X):
@@ -50,6 +63,7 @@ class DGMBase:
         self.logs['fn'].append(self.F(X.mean(0)).item())
         self.logs['i'].append(k)
 
+    # FIXME: add ability to continue from args
     def run(self, X0, n_iters=100, lp=1, **kwargs):
         """
         Params:
@@ -85,23 +99,24 @@ class EXTRA(DGMBase):
         return G0, X1
 
     def _stateInit(self, X0):
-        W = self.gen()
+        self._initLogs()
         X0.requires_grad_(True)
         G0 = D(self.F(X0), X0)
         with torch.no_grad():
-            X1 = W@X0 - self.eta*G0
-        self._initLogs()
+            Y = self._consensus(X0)
+            X1 = Y - self.eta*G0
         self._record(X1, 0)
         self._k += 1
 
         return G0, X1
 
     def _step(self, X0, G0, X1):
-        W = self.gen()
         X1.requires_grad_(True)
         G1 = D(self.F(X1), X1)
         with torch.no_grad():
-            X2 = X1 - X0/2 + W@(X1-X0/2) - self.eta*(G1-G0)
+            Y0 = X1 - .5*X0
+            Y1 = self._consensus(Y0)
+            X2 = Y0 + Y1 - self.eta*(G1-G0)
 
         return X1, G1, X2
 
@@ -123,16 +138,22 @@ class DIGing(DGMBase):
         return G0, Y0
 
     def _step(self, X0, G0, Y0):
-        W = self.gen()
         with torch.no_grad():
-            X1 = W@X0 - self.eta*Y0
+            WX, WY = self._consensus(X0, Y0)
+            X1 = WX - self.eta*Y0
             
         X1.requires_grad_(True)
         G1 = D(self.F(X1), X1)
         with torch.no_grad():
-            Y1 = W@Y0 + G1 - G0
+            Y1 = WY + G1 - G0
 
         return X1, G1, Y1
+
+    def _consensusUpdate(self, X0, Y0):
+        W = self.gen()
+        X1 = W @ X0
+        Y1 = W @ Y0
+        return X1, Y1
 
 
 class DSGD(DGMBase):
@@ -162,7 +183,7 @@ class DAccGD(DGMBase):
     """
     Decentralized one-process AGD subroutine
     """
-    def __init__(self, F, graph_generator, L=1., mu=0., con_iters=20):
+    def __init__(self, F, graph_generator, L, mu, con_iters=20):
         """
         Params:
         -------
@@ -206,7 +227,7 @@ class DAccGD(DGMBase):
         with torch.no_grad():
             V = self.mu*Y + (1+A0*self.mu)*U0 - a*G
             V /= 1 + A0*self.mu + self.mu
-            U1 = self._consensusUpdate(V)
+            U1 = self._consensus(V)
             X1 = (a*U1 + A0*X0) / A1
 
         return X1, A1, U1
@@ -217,43 +238,7 @@ class DAccGD(DGMBase):
         return U1
 
 
-class MDAccGD(DAccGD):
-    """
-    Modified Decentralized one-process AGD subroutine.
-
-    (FastMix update per gradient descent step is
-     substituted for series of consensus operations.)
-    """
-    def __init__(
-            self, F, graph_generator,
-            L=1., mu=0., M=1., kappa_g=10):
-        super().__init__(F, graph_generator, L, mu, 1)
-
-        assert M/L*kappa_g > math.e
-        self._beta = math.log(M/L*kappa_g)
-
-    def _consensusUpdate(self, X0):
-        """
-        FastMix update - an efficient way of averaging
-        proposed by Liu & Morse (2011).
-        """
-        W = self.gen()
-        s2 = lambda_2(W)
-        assert s2 < 1
-
-        eta_w = (1 - s2*s2)**.5
-        eta_w = (1-eta_w) / (1+eta_w)
-        K = math.ceil(1./(1-s2)**.5 * self._beta)
-        X1 = X0.clone()
-
-        for _ in range(K):
-            X2 = (1+eta_w)*W@X1 - eta_w*X0
-            X1, X0 = X2, X1
-
-        return X2
-
-
-class Mudag(MDAccGD):
+class Mudag(DGMBase):
     """
     Implementation of arXiv:2005.00797 (Mudag)
 
@@ -265,11 +250,28 @@ class Mudag(MDAccGD):
         kappa_g: float
             Condition number of the objective
     """
-    def __init__(self, F, graph_generator, L, mu, M, kappa_g):
-        super().__init__(F, graph_generator, L, mu, M, kappa_g)
-        self.eta = 1. / L
-        alpha = (mu / L)**.5
-        self._alpha = (1-alpha) / (1+alpha)
+    def __init__(self, F, W, L, mu, M, kappa_g, scale=.01):
+        super().__init__(F, None, 1./L)
+        gamma = math.log(M/L*kappa_g)
+        self._alpha = self._setAlpha(mu, L)
+        self._setConsensus(W, gamma, scale)
+
+    def _setConsensus(self, W, gamma, scale):
+        self.W = W
+        s2 = lambda_2(W)
+        assert s2 < 1
+
+        assert gamma > 1
+        gamma *= scale
+
+        eta_w = (1 - s2*s2)**.5
+        self.eta_w = (1-eta_w) / (1+eta_w)
+        self.K = math.ceil(1./(1-s2)**.5 * gamma)
+
+    def _setAlpha(self, mu, L):
+        alpha = (mu/L)**.5
+        alpha = (1-alpha) / (1+alpha)
+        return alpha
 
     def _args(self, kwargs):
         Y0 = kwargs['Y0']
@@ -290,21 +292,36 @@ class Mudag(MDAccGD):
         G1 = D(self.F(Y1), Y1)
 
         with torch.no_grad():
-            X1 = self._consensusUpdate(Y1+X0-Y0-self.eta*(G1-G0))
+            X1 = self._consensus(Y1+X0-Y0-self.eta*(G1-G0))
             Y2 = X1 + self._alpha*(X1-X0)
 
         return X1, Y1, G1, Y2
+
+    def _consensusUpdate(self, X0):
+        """
+        FastMix update - an efficient way of averaging
+        proposed by Liu & Morse (2011).
+        """
+        X1 = X0.clone()
+        for _ in range(self.K):
+            X2 = (1+self.eta_w)*self.W@X1 - self.eta_w*X0
+            X0, X1 = X1, X2
+
+        return X1
 
 
 class SDAccGD(DAccGD):
     """
     DAccGD with FastMix-like update
     """
-    def __init__(
-            self, F, graph_generator,
-            L=1., mu=0., M=1., con_iters=20):
-        super().__init__(F, graph_generator, L, mu, M)
-        self.con_iters = con_iters
+    def __init__(self, F, graph_generator, L, mu, E_s2, con_iters):
+        super().__init__(F, graph_generator, L, mu, con_iters)
+        self.eta_w = self._setEtaW(E_s2)
+
+    def _setEtaW(self, E_s2):
+        eta_w = (1 - E_s2*E_s2)**.5
+        eta_w = (1-eta_w) / (1+eta_w)
+        return eta_w
 
     def _consensusUpdate(self, X0):
         """
@@ -313,27 +330,111 @@ class SDAccGD(DAccGD):
         X1 = X0.clone()
         for _ in range(self.con_iters):
             W = self.gen()
-            s2 = lambda_2(W)
-            assert s2 < 1
+            X2 = (1+self.eta_w)*W@X1 - self.eta_w*X0
+            X0, X1 = X1, X2
 
-            eta_w = (1 - s2*s2)**.5
-            eta_w = (1-eta_w) / (1+eta_w)
-            X2 = (1+eta_w)*W@X1 - eta_w*X0
-            X1, X0 = X2, X1
-
-        return X2
+        return X1
 
 
 class SMudag(Mudag, SDAccGD):
     """
-    Stochastic modification (with mixing matrix
+    Stochastic adaptation (with mixing matrix
     update per consensus iteration) of Mudag algorithm.
     """
-    def __init__(self, F, graph_generator, L, mu, M, con_iters=20):
-        SDAccGD.__init__(self, F, graph_generator, L, mu, M, con_iters)
-        self.eta = 1. / L
-        alpha = (mu / L)**.5
-        self._alpha = (1-alpha) / (1+alpha)
+    def __init__(self, F, graph_generator, L, mu, E_s2, con_iters):
+        DGMBase.__init__(self, F, graph_generator, 1./L)
+        self.eta_w = SDAccGD._setEtaW(self, E_s2)
+        self._alpha = self._setAlpha(mu, L)
 
     def _consensusUpdate(self, X0):
-        return SDAccGD._consensusUpdate(self, X0)
+        X1 = SDAccGD._consensusUpdate(self, X0)
+        return X1
+
+
+class APM1_C(DGMBase):
+    """
+    Original implementation of Accelerated Penalty Method with Consensus.
+    (arXiv.org > math > arXiv:1810.01053)
+    """
+    def __init__(self, F, W, L, mu, beta, scale=.01):
+        super().__init__(F, None, 1./L)
+        self._setEssential(L, mu, beta)
+        self._setConsensus(W, scale)
+
+    def _setConsensus(self, W, scale):
+        self.W = W
+        s2 = lambda_2(W)
+        assert s2 < 1
+
+        eta_w = (1 - s2*s2)**.5
+        self.eta_w = (1-eta_w) / (1+eta_w)
+        self._gamma = scale*self.theta / (1-s2)**.5
+
+    def _setEssential(self, L, mu, beta):
+        theta = (mu/L)**.5
+        alpha = (1-theta) / theta
+        alpha *= (L*theta-mu) / (L-mu)
+
+        self.theta = theta
+        self._alpha = alpha
+        self.beta = beta
+
+    def _stateInit(self, X0):
+        self._initLogs()
+        X1, k = X0.clone(), 0
+        return X1, k
+
+    def _args(self, kwargs):
+        X1 = kwargs['X1']
+        k = kwargs['k']
+        return X1, k
+
+    def _step(self, X0, X1, k):
+        Y = X1 + self._alpha*(X1-X0)
+        Y.requires_grad_(True)
+        G = D(self.F(Y), Y)
+
+        with torch.no_grad(): Z0 = Y - self.eta*G
+        Z1 = self._consensus(Z0, k)
+
+        upsilon = (1 - self.theta)**(k+1)
+        X2 = upsilon*Z1 + self.beta*Z0
+        X2 = X2 / (upsilon + self.beta)
+        return X1, X2, k+1
+
+    def _consensusUpdate(self, Z0, k):
+        T_k = math.ceil(k*self._gamma)
+
+        Z1 = Z0.clone()
+        for _ in range(T_k):
+            Z2 = (1+self.eta_w)*self.W@Z1 - self.eta_w*Z0
+            Z0, Z1 = Z1, Z2
+
+        return Z1
+
+
+class SAPM1_C(APM1_C):
+    """
+    An adaptation of APM-C for time-varying graphs.
+    """
+    def __init__(self, F, graph_generator, L, mu, beta, E_s2, scale=.01):
+        DGMBase.__init__(self, F, graph_generator, 1./L)
+        self._setEssential(L, mu, beta)
+        self._setConsensus(E_s2, scale)
+
+    def _setConsensus(self, E_s2, scale):
+        eta_w = (1 - E_s2*E_s2)**.5
+        self.eta_w = (1-eta_w) / (1+eta_w)
+        self._gamma = self.theta/(1-E_s2)**.5
+        self._gamma *= scale
+
+    def _consensusUpdate(self, Z0, k):
+        self.con_iters = math.ceil(k*self._gamma)
+
+        Z1 = Z0.clone()
+        for _ in range(self.con_iters):
+            W = self.gen()
+            Z2 = (1+self.eta_w)*W@Z1 - self.eta_w*Z0
+            Z0, Z1 = Z1, Z2
+
+        return Z1

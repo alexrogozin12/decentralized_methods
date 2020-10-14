@@ -46,8 +46,30 @@ def metropolis_weights(A):
 
 
 def lambda_2(W):
+    """
+    Returns the second-largest eigenvalue of W
+    """
     s,_ = torch.lobpcg(W, 2)
     return s[1]
+
+def expected_lambda2(gen, N):
+    """
+    Dummy implementation of the expectation of
+    the second-largest eigenvalue of a mixing matrix
+
+    Returns a pair:
+    1 - the most-relevant assessment of E[eig(W)]
+    2 - sequence of experiments, which may be processed further
+    """
+    seq = np.empty(N+1)
+    seq[0] = 0
+
+    for i in range(1, N+1):
+        W = gen()
+        s = lambda_2(W)
+        seq[i] = (seq[i-1]*(i-1) + s) / i
+
+    return seq[-1], seq
 
 
 class PythonGraph:
