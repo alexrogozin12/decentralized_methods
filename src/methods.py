@@ -134,6 +134,29 @@ class DIGing(DGMBase):
 
         return X1, G1, Y1
 
+
+class DSGD(DGMBase):
+    """
+    Decentralized one-process (Gossip) SGD
+    """
+    def _args(self, kwargs):
+        return ()
+
+    def _stateInit(self, X0):
+        self._initLogs()
+        return ()
+
+    def _updateStepsize(self, k):
+        self.eta = self._eta # / (1+k)**.5
+
+    def _step(self, X0, *args):
+        X0.requires_grad_(True)
+        G = D(self.F(X0), X0)
+        W = self.gen()
+        with torch.no_grad():
+            X1 = W @ (X0-self.eta*G)
+        return (X1,)
+
     
 class DAccGD(DGMBase):
     """
@@ -180,40 +203,57 @@ class DAccGD(DGMBase):
         Y.requires_grad_(True)
         G = D(self.F(Y), Y)
 
-        W_series = [self.gen() for _ in range(self.con_iters)]
         with torch.no_grad():
             V = self.mu*Y + (1+A0*self.mu)*U0 - a*G
             V /= 1 + A0*self.mu + self.mu
-            U1 = torch.chain_matmul(*W_series, V)
+            U1 = self._consensusUpdate(V)
             X1 = (a*U1 + A0*X0) / A1
 
         return X1, A1, U1
 
+    def _consensusUpdate(self, V):
+        W_series = [self.gen() for _ in range(self.con_iters)]
+        U1 = torch.chain_matmul(*W_series, V)
+        return U1
 
-class DSGD(DGMBase):
+
+class MDAccGD(DAccGD):
     """
-    Decentralized one-process (Gossip) SGD
+    Modified Decentralized one-process AGD subroutine.
+
+    (FastMix update per gradient descent step is
+     substituted for series of consensus operations.)
     """
-    def _args(self, kwargs):
-        return ()
+    def __init__(
+            self, F, graph_generator,
+            L=1., mu=0., M=1., kappa_g=10):
+        super().__init__(F, graph_generator, L, mu, 1)
 
-    def _stateInit(self, X0):
-        self._initLogs()
-        return ()
+        assert M/L*kappa_g > math.e
+        self._beta = math.log(M/L*kappa_g)
 
-    def _updateStepsize(self, k):
-        self.eta = self._eta # / (1+k)**.5
-
-    def _step(self, X0, *args):
-        X0.requires_grad_(True)
-        G = D(self.F(X0), X0)
+    def _consensusUpdate(self, X0):
+        """
+        FastMix update - an efficient way of averaging
+        proposed by Liu & Morse (2011).
+        """
         W = self.gen()
-        with torch.no_grad():
-            X1 = W @ (X0-self.eta*G)
-        return (X1,)
+        s2 = lambda_2(W)
+        assert s2 < 1
+
+        eta_w = (1 - s2*s2)**.5
+        eta_w = (1-eta_w) / (1+eta_w)
+        K = math.ceil(1./(1-s2)**.5 * self._beta)
+        X1 = X0.clone()
+
+        for _ in range(K):
+            X2 = (1+eta_w)*W@X1 - eta_w*X0
+            X1, X0 = X2, X1
+
+        return X2
 
 
-class Mudag(DGMBase):
+class Mudag(MDAccGD):
     """
     Implementation of arXiv:2005.00797 (Mudag)
 
@@ -226,13 +266,10 @@ class Mudag(DGMBase):
             Condition number of the objective
     """
     def __init__(self, F, graph_generator, L, mu, M, kappa_g):
-        super().__init__(F, graph_generator)
+        super().__init__(F, graph_generator, L, mu, M, kappa_g)
         self.eta = 1. / L
         alpha = (mu / L)**.5
         self._alpha = (1-alpha) / (1+alpha)
-
-        assert M/L*kappa_g > math.e
-        self._beta = math.log(M/L*kappa_g)
 
     def _args(self, kwargs):
         Y0 = kwargs['Y0']
@@ -252,84 +289,51 @@ class Mudag(DGMBase):
         Y1.requires_grad_(True)
         G1 = D(self.F(Y1), Y1)
 
-        W = self.gen()
         with torch.no_grad():
-            X1 = self._fastMix(Y1+X0-Y0-self.eta*(G1-G0), W)
+            X1 = self._consensusUpdate(Y1+X0-Y0-self.eta*(G1-G0))
             Y2 = X1 + self._alpha*(X1-X0)
 
         return X1, Y1, G1, Y2
 
-    def _fastMix(self, X0, W, scale=1):
-        s2 = lambda_2(W)
-        assert s2 < 1
 
-        eta_w = (1 - s2*s2)**.5
-        K = scale * math.ceil(1./(1-s2)**.5*self._beta)
-        eta_w = (1-eta_w) / (1+eta_w)
-        X1 = X0.clone()
-
-        for _ in range(K):
-            X2 = (1+eta_w)*W@X1 - eta_w*X0
-            X1, X0 = X2, X1
-
-        return X2
-
-
-class MDAccGD(DGMBase):
+class SDAccGD(DAccGD):
     """
-    Modified Decentralized one-process AGD subroutine
+    DAccGD with FastMix-like update
     """
     def __init__(
             self, F, graph_generator,
-            L=1., mu=0., M=1., kappa_g=10):
-        super().__init__(F, graph_generator)
-        del self.eta
+            L=1., mu=0., M=1., con_iters=20):
+        super().__init__(F, graph_generator, L, mu, M)
+        self.con_iters = con_iters
 
-        self.L = L
-        self.mu = mu
-
-        assert M/L*kappa_g > math.e
-        self._beta = math.log(M/L*kappa_g)
-
-    def _args(self, kwargs):
-        A0 = kwargs['A0']
-        U0 = kwargs['U0']
-        return A0, U0
-
-    def _stateInit(self, X0):
-        self._initLogs()
-        A0, U0 = 0, X0.clone()
-        return A0, U0
-
-    def _step(self, X0, A0, U0):
-        a = 1 + A0*self.mu
-        a = (a + (a**2 + 4*self.L*A0*a)**.5) / (2*self.L)
-        A1 = A0 + a
-
-        Y = (a*U0 + A0*X0) / A1
-        Y.requires_grad_(True)
-        G = D(self.F(Y), Y)
-
-        W = self.gen()
-        with torch.no_grad():
-            V = self.mu*Y + (1+A0*self.mu)*U0 - a*G
-            V /= 1 + A0*self.mu + self.mu
-            U1 = self._fastMix(V, W)
-            X1 = (a*U1 + A0*X0) / A1
-
-        return X1, A1, U1
-
-    def _fastMix(self, X0, W):
-        s2 = lambda_2(W)
-        assert s2 < 1
-
-        eta_w = (1 - s2*s2)**.5                  # eta_w = (1-s2)**.5         (?)
-        K = math.ceil(1./(1-s2)**.5*self._beta)  # K ~ 1./eta_w * self._beta  (?)
-        eta_w = (1-eta_w) / (1+eta_w)            # or the other way around
+    def _consensusUpdate(self, X0):
+        """
+        An adaptation of FastMix for time-varying graphs.
+        """
         X1 = X0.clone()
+        for _ in range(self.con_iters):
+            W = self.gen()
+            s2 = lambda_2(W)
+            assert s2 < 1
 
-        for _ in range(K):
+            eta_w = (1 - s2*s2)**.5
+            eta_w = (1-eta_w) / (1+eta_w)
             X2 = (1+eta_w)*W@X1 - eta_w*X0
             X1, X0 = X2, X1
 
         return X2
+
+
+class SMudag(Mudag, SDAccGD):
+    """
+    Stochastic modification (with mixing matrix
+    update per consensus iteration) of Mudag algorithm.
+    """
+    def __init__(self, F, graph_generator, L, mu, M, con_iters=20):
+        SDAccGD.__init__(self, F, graph_generator, L, mu, M, con_iters)
+        self.eta = 1. / L
+        alpha = (mu / L)**.5
+        self._alpha = (1-alpha) / (1+alpha)
+
+    def _consensusUpdate(self, X0):
+        return SDAccGD._consensusUpdate(self, X0)
