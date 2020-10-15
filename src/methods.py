@@ -351,7 +351,7 @@ class SMudag(Mudag, SDAccGD):
         return X1
 
 
-class APM1_C(DGMBase):
+class APM_C(DGMBase):
     """
     Original implementation of Accelerated Penalty Method with Consensus.
     (arXiv.org > math > arXiv:1810.01053)
@@ -413,7 +413,7 @@ class APM1_C(DGMBase):
         return Z1
 
 
-class SAPM1_C(APM1_C):
+class SAPM_C(APM_C):
     """
     An adaptation of APM-C for time-varying graphs.
     """
