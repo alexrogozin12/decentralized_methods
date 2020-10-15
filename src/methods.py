@@ -345,6 +345,7 @@ class SMudag(Mudag, SDAccGD):
         DGMBase.__init__(self, F, graph_generator, 1./L)
         self.eta_w = SDAccGD._setEtaW(self, E_s2)
         self._alpha = self._setAlpha(mu, L)
+        self.con_iters = con_iters
 
     def _consensusUpdate(self, X0):
         X1 = SDAccGD._consensusUpdate(self, X0)
