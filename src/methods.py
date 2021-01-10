@@ -57,7 +57,6 @@ class DGMBase:
         self.logs['nmix'].append(self._cT)
         self.logs['i'].append(k)
 
-    # FIXME: add ability to continue from args
     def run(self, X0, *args, n_iters=100, lp=1, **kwargs):
         """
         Params:
@@ -252,7 +251,7 @@ class Mudag(DGMBase):
     def _setConsensus(self, W, gamma, scale):
         self.W = W
         s2 = lambda_2(W)
-        assert s2 < 1
+        assert s2 < 1, 'Disconnected graph'
 
         assert gamma > 1
         gamma *= scale
@@ -304,45 +303,18 @@ class Mudag(DGMBase):
         return X1
 
 
-class SDAccGD(DAccGD):
-    """
-    DAccGD with FastMix-like update
-    """
-    def __init__(self, F, graph_generator, L, mu, E_s2, con_iters):
-        super().__init__(F, graph_generator, L, mu, con_iters)
-        self.eta_w = self._setEtaW(E_s2)
-
-    def _setEtaW(self, E_s2):
-        eta_w = (1 - E_s2*E_s2)**.5
-        eta_w = (1-eta_w) / (1+eta_w)
-        return eta_w
-
-    def _consensusUpdate(self, X0):
-        """
-        An adaptation of FastMix for time-varying graphs.
-        """
-        X1 = X0.clone()
-        for _ in range(self.con_iters):
-            W = self.gen()
-            X2 = (1+self.eta_w)*W@X1 - self.eta_w*X0
-            X0, X1 = X1, X2
-
-        return X1
-
-
-class SMudag(Mudag, SDAccGD):
+class SMudag(Mudag, DAccGD):
     """
     Stochastic adaptation (with mixing matrix
     update per consensus iteration) of Mudag algorithm.
     """
-    def __init__(self, F, graph_generator, L, mu, E_s2, con_iters):
+    def __init__(self, F, graph_generator, L, mu, con_iters):
         DGMBase.__init__(self, F, graph_generator, 1./L)
-        self.eta_w = SDAccGD._setEtaW(self, E_s2)
         self._alpha = self._setAlpha(mu, L)
         self.con_iters = con_iters
 
     def _consensusUpdate(self, X0):
-        X1 = SDAccGD._consensusUpdate(self, X0)
+        X1 = DAccGD._consensusUpdate(self, X0)
         return X1
 
 
@@ -359,7 +331,7 @@ class APM_C(DGMBase):
     def _setConsensus(self, W, scale):
         self.W = W
         s2 = lambda_2(W)
-        assert s2 < 1
+        assert s2 < 1, 'Disconnected graph'
 
         eta_w = (1 - s2*s2)**.5
         self.eta_w = (1-eta_w) / (1+eta_w)
