@@ -171,7 +171,7 @@ class DSGD(DGMBase):
         return (X1,)
 
     
-class DAccGD(DGMBase):
+class SDAccGD(DGMBase):
     """
     Decentralized one-process AGD subroutine
     """
@@ -303,7 +303,7 @@ class Mudag(DGMBase):
         return X1
 
 
-class SMudag(Mudag, DAccGD):
+class SMudag(Mudag, SDAccGD):
     """
     Stochastic adaptation (with mixing matrix
     update per consensus iteration) of Mudag algorithm.
@@ -314,7 +314,24 @@ class SMudag(Mudag, DAccGD):
         self.con_iters = con_iters
 
     def _consensusUpdate(self, X0):
-        X1 = DAccGD._consensusUpdate(self, X0)
+        X1 = SDAccGD._consensusUpdate(self, X0)
+        return X1
+
+
+class DAccGD(SDAccGD, Mudag):
+    """
+    Static implementation of SDAccGD
+    """
+    def __init__(self, F, W, L, mu, M, kappa_g, scale=.01):
+        DGMBase.__init__(self, F, None, 1./L)
+        gamma = math.log(M/L*kappa_g)
+        Mudag._setConsensus(self, W, gamma, scale)
+
+        self.L = L
+        self.mu = mu
+
+    def _consensusUpdate(self, X0):
+        X1 = Mudag._consensusUpdate(self, X0)
         return X1
 
 
@@ -405,3 +422,4 @@ class SAPM_C(APM_C):
             Z0, Z1 = Z1, Z2
 
         return Z1
+

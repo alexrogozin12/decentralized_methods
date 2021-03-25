@@ -67,7 +67,7 @@ class StochObjective(Objective):
         avg: float
             Number of batches sampled on every node.
 
-        mCols: torch.LongTensor
+        batch_sizes: torch.LongTensor
             Initial batch sizes on nodes.
 
         static: bool
@@ -76,15 +76,16 @@ class StochObjective(Objective):
     """
     def __init__(
             self, A, b, num_nodes,
-            sigma=1e-1, avg=1, mCols=None, static=True):
+            sigma=1e-1, avg=1, batch_sizes=None, static=True):
         super().__init__(A, b, num_nodes, sigma)
-        self.m = mCols
+        self.m = batch_sizes
         self.avg = avg
 
         n, d = self.b.shape
         self.static = static
+
         self.sampleM = lambda : self._sampleM(d//2, d, n)
-        if mCols is None and static: self.m = self.sampleM()
+        if batch_sizes is None and static: self.m = self.sampleM()
 
     def _sampleXi(self, m):
         ones = torch.ones_like(self.b)
@@ -97,13 +98,13 @@ class StochObjective(Objective):
     def sampleXi(self, m):
         xi = self.b.new(self.avg, *self.b.shape)
         for r in xi: r[:] = self._sampleXi(m)
-        return xi
+        return xi.squeeze(dim=0)
 
     def _sampleM(self, limA, limB, size):
         return torch.randint(limA, limB, (size,))
 
     def __call__(self, X):
-        if self.static: self.m = self.sampleM()
+        if not self.static: self.m = self.sampleM()
         return self._fnCall(X, self.m)
 
     def _fnCall(self, X, m):
