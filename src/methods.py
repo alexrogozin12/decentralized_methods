@@ -258,7 +258,7 @@ class Mudag(DGMBase):
 
         eta_w = (1 - s2*s2)**.5
         self.eta_w = (1-eta_w) / (1+eta_w)
-        self.K = math.ceil(1./(1-s2)**.5 * gamma)
+        self.con_iters = math.ceil(1./(1-s2)**.5 * gamma)
 
     def _setAlpha(self, mu, L):
         alpha = (mu/L)**.5
@@ -296,7 +296,7 @@ class Mudag(DGMBase):
         proposed by Liu & Morse (2011).
         """
         X1 = X0.clone()
-        for _ in range(self.K):
+        for _ in range(self.con_iters):
             X2 = (1+self.eta_w)*self.W@X1 - self.eta_w*X0
             X0, X1 = X1, X2
 
@@ -387,10 +387,10 @@ class APM_C(DGMBase):
         return X1, X2, k+1
 
     def _consensusUpdate(self, Z0, k):
-        T_k = math.ceil(k*self._gamma)
+        self.con_iters = math.ceil(k*self._gamma)
 
         Z1 = Z0.clone()
-        for _ in range(T_k):
+        for _ in range(self.con_iters):
             Z2 = (1+self.eta_w)*self.W@Z1 - self.eta_w*Z0
             Z0, Z1 = Z1, Z2
 
